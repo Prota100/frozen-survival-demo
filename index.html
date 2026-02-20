@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Frozen Survival</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; overflow:hidden; background:#1a1a2e; font-family:'Segoe UI',sans-serif; }
+canvas { display:block; touch-action:none; }
+#ui { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+#ui > * { pointer-events:auto; }
+#score-bar { position:absolute; top:10px; left:50%; transform:translateX(-50%); display:flex; gap:16px; font-size:16px; color:#fff; text-shadow:1px 1px 3px rgba(0,0,0,0.7); }
+.stat { display:flex; align-items:center; gap:4px; background:rgba(0,0,0,0.5); padding:6px 14px; border-radius:20px; }
+#upgrade-btn { position:absolute; bottom:20px; left:50%; transform:translateX(-50%); background:linear-gradient(135deg,#f7971e,#ffd200); color:#1a1a2e; border:none; padding:14px 32px; border-radius:30px; font-size:18px; font-weight:bold; cursor:pointer; box-shadow:0 4px 15px rgba(247,151,30,0.5); transition:transform 0.1s; }
+#upgrade-btn:active { transform:translateX(-50%) scale(0.95); }
+#start-screen, #result-screen { position:absolute; top:0; left:0; width:100%; height:100%; display:flex; flex-direction:column; align-items:center; justify-content:center; background:rgba(10,10,30,0.92); color:#fff; z-index:10; }
+#start-screen h1 { font-size:42px; margin-bottom:8px; text-shadow:0 0 20px rgba(100,200,255,0.6); }
+#start-screen p { font-size:16px; color:#aac; margin-bottom:30px; }
+#result-screen h2 { font-size:36px; margin-bottom:12px; }
+#result-screen .final { font-size:20px; color:#ffd200; margin-bottom:24px; }
+.big-btn { background:linear-gradient(135deg,#00b4db,#0083b0); color:#fff; border:none; padding:16px 48px; border-radius:30px; font-size:20px; font-weight:bold; cursor:pointer; box-shadow:0 4px 20px rgba(0,180,219,0.4); }
+#timer-bar { position:absolute; top:54px; left:50%; transform:translateX(-50%); width:200px; height:8px; background:rgba(255,255,255,0.15); border-radius:4px; overflow:hidden; }
+#timer-fill { width:100%; height:100%; background:linear-gradient(90deg,#ff6b6b,#ffd200); border-radius:4px; transition:width 0.3s; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui">
+  <div id="score-bar">
+    <div class="stat">🧑 <span id="pop">0</span></div>
+    <div class="stat">🔥 Lv.<span id="lvl">1</span></div>
+    <div class="stat">⭐ <span id="pts">0</span></div>
+  </div>
+  <div id="timer-bar"><div id="timer-fill"></div></div>
+  <button id="upgrade-btn">🔥 기지 업그레이드 (10⭐)</button>
+
+  <div id="start-screen">
+    <h1>❄️ Frozen Survival</h1>
+    <p>생존자를 탭해서 기지로 구출하세요!</p>
+    <button class="big-btn" id="start-btn">게임 시작</button>
+  </div>
+
+  <div id="result-screen" style="display:none;">
+    <h2 id="result-title">결과</h2>
+    <div class="final" id="result-detail"></div>
+    <button class="big-btn" id="retry-btn">다시 하기</button>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Game state
+let state = 'start'; // start, play, result
+let population = 0, level = 1, points = 0;
+let survivors = [], particles = [], snowflakes = [];
+let baseRadius = 50;
+let baseX, baseY;
+let timeLeft = 60, maxTime = 60;
+let lastTime = 0;
+let waveTimer = 0;
+let upgradeCost = 10;
+
+// Snowflakes
+for (let i = 0; i < 80; i++) {
+  snowflakes.push({ x: Math.random()*2000, y: Math.random()*2000, r: Math.random()*3+1, speed: Math.random()*1.5+0.5, drift: Math.random()*0.5-0.25 });
+}
+
+function spawnSurvivor() {
+  let edge = Math.random()*4|0;
+  let x, y;
+  if (edge===0) { x=Math.random()*W; y=-30; }
+  else if (edge===1) { x=W+30; y=Math.random()*H; }
+  else if (edge===2) { x=Math.random()*W; y=H+30; }
+  else { x=-30; y=Math.random()*H; }
+
+  // Random wander target (not too close to base initially)
+  let tx = Math.random()*(W-100)+50;
+  let ty = Math.random()*(H-150)+80;
+
+  survivors.push({
+    x, y, tx, ty, r:14, hp:100, saved:false, moving:true, selected:false,
+    color: ['#ff6b6b','#ffd93d','#6bcb77','#4d96ff','#ff922b'][Math.random()*5|0],
+    wanderTimer: Math.random()*3+1, shiver: 0
+  });
+}
+
+function spawnParticles(x, y, color, count) {
+  for (let i=0; i<count; i++) {
+    let angle = Math.random()*Math.PI*2;
+    let speed = Math.random()*3+1;
+    particles.push({ x, y, vx:Math.cos(angle)*speed, vy:Math.sin(angle)*speed, life:1, color, r:Math.random()*4+2 });
+  }
+}
+
+function distanceTo(ax, ay, bx, by) {
+  return Math.hypot(ax-bx, ay-by);
+}
+
+// Input
+let pointer = null;
+function getPos(e) {
+  let t = e.touches ? e.touches[0] : e;
+  return { x: t.clientX, y: t.clientY };
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (state !== 'play') return;
+  let p = { x: e.clientX, y: e.clientY };
+
+  // Find closest survivor
+  let best = null, bestD = 60;
+  for (let s of survivors) {
+    if (s.saved) continue;
+    let d = distanceTo(p.x, p.y, s.x, s.y);
+    if (d < bestD) { bestD = d; best = s; }
+  }
+  if (best) {
+    best.selected = true;
+    best.tx = baseX;
+    best.ty = baseY;
+    best.moving = true;
+    spawnParticles(best.x, best.y, best.color, 5);
+  }
+});
+
+// Upgrade
+document.getElementById('upgrade-btn').addEventListener('click', () => {
+  if (state !== 'play') return;
+  if (points >= upgradeCost) {
+    points -= upgradeCost;
+    level++;
+    baseRadius += 15;
+    upgradeCost = Math.floor(upgradeCost * 1.8);
+    document.getElementById('upgrade-btn').textContent = `🔥 기지 업그레이드 (${upgradeCost}⭐)`;
+    spawnParticles(baseX, baseY, '#ffd200', 20);
+  }
+});
+
+// Start / Retry
+document.getElementById('start-btn').addEventListener('click', startGame);
+document.getElementById('retry-btn').addEventListener('click', startGame);
+
+function startGame() {
+  state = 'play';
+  population = 0; level = 1; points = 0; timeLeft = maxTime;
+  survivors = []; particles = [];
+  baseRadius = 50; upgradeCost = 10;
+  baseX = W/2; baseY = H/2;
+  document.getElementById('start-screen').style.display = 'none';
+  document.getElementById('result-screen').style.display = 'none';
+  document.getElementById('upgrade-btn').textContent = `🔥 기지 업그레이드 (${upgradeCost}⭐)`;
+  waveTimer = 0;
+  // Spawn initial survivors
+  for (let i=0; i<5; i++) spawnSurvivor();
+}
+
+function endGame() {
+  state = 'result';
+  document.getElementById('result-title').textContent = population >= 10 ? '🎉 생존 성공!' : '💀 시간 종료';
+  document.getElementById('result-detail').textContent = `구출: ${population}명 | 기지 Lv.${level} | 점수: ${points}⭐`;
+  document.getElementById('result-screen').style.display = 'flex';
+}
+
+function update(dt) {
+  if (state !== 'play') return;
+
+  timeLeft -= dt;
+  if (timeLeft <= 0) { timeLeft = 0; endGame(); return; }
+
+  // Spawn waves
+  waveTimer -= dt;
+  if (waveTimer <= 0) {
+    let count = Math.min(3 + level, 8);
+    for (let i=0; i<count; i++) spawnSurvivor();
+    waveTimer = Math.max(2, 5 - level*0.3);
+  }
+
+  // Update survivors
+  for (let s of survivors) {
+    if (s.saved) continue;
+    s.shiver += dt * 10;
+
+    // HP decreases (cold)
+    s.hp -= dt * (5 + level);
+    if (s.hp <= 0) {
+      spawnParticles(s.x, s.y, '#88ccff', 8);
+      s.saved = true; // remove
+      continue;
+    }
+
+    if (s.moving) {
+      let dx = s.tx - s.x, dy = s.ty - s.y;
+      let dist = Math.hypot(dx, dy);
+      let speed = s.selected ? 200 : 40;
+      if (dist > 5) {
+        s.x += (dx/dist)*speed*dt;
+        s.y += (dy/dist)*speed*dt;
+      } else {
+        if (s.selected) {
+          // Reached base?
+          if (distanceTo(s.x, s.y, baseX, baseY) < baseRadius + 20) {
+            s.saved = true;
+            population++;
+            points += level;
+            spawnParticles(baseX, baseY, '#6bcb77', 12);
+          }
+        } else {
+          s.moving = false;
+          s.wanderTimer = Math.random()*3+2;
+        }
+      }
+    } else {
+      s.wanderTimer -= dt;
+      if (s.wanderTimer <= 0) {
+        s.tx = Math.max(20, Math.min(W-20, s.x + (Math.random()-0.5)*200));
+        s.ty = Math.max(60, Math.min(H-40, s.y + (Math.random()-0.5)*200));
+        s.moving = true;
+      }
+    }
+  }
+
+  // Clean dead survivors
+  survivors = survivors.filter(s => !s.saved || distanceTo(s.x, s.y, baseX, baseY) < baseRadius);
+
+  // Particles
+  for (let p of particles) {
+    p.x += p.vx; p.y += p.vy;
+    p.vy += 0.05;
+    p.life -= dt*2;
+  }
+  particles = particles.filter(p => p.life > 0);
+
+  // UI
+  document.getElementById('pop').textContent = population;
+  document.getElementById('lvl').textContent = level;
+  document.getElementById('pts').textContent = points;
+  document.getElementById('timer-fill').style.width = (timeLeft/maxTime*100)+'%';
+}
+
+function draw() {
+  // Background gradient
+  let grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0f0c29');
+  grad.addColorStop(0.5, '#1a1a3e');
+  grad.addColorStop(1, '#24243e');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Ground snow
+  ctx.fillStyle = 'rgba(200,220,240,0.08)';
+  ctx.fillRect(0, H*0.65, W, H*0.35);
+
+  // Snowflakes
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  for (let s of snowflakes) {
+    s.y += s.speed;
+    s.x += s.drift;
+    if (s.y > H+10) { s.y = -10; s.x = Math.random()*W; }
+    if (s.x > W+10) s.x = -10;
+    if (s.x < -10) s.x = W+10;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  if (state === 'start') return;
+
+  // Base glow
+  let glowR = baseRadius + 20 + Math.sin(Date.now()/500)*5;
+  let glow = ctx.createRadialGradient(baseX, baseY, baseRadius*0.3, baseX, baseY, glowR);
+  glow.addColorStop(0, `rgba(255,${150+level*10},50,0.4)`);
+  glow.addColorStop(0.6, `rgba(255,${100+level*10},30,0.15)`);
+  glow.addColorStop(1, 'rgba(255,100,30,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(baseX, baseY, glowR, 0, Math.PI*2);
+  ctx.fill();
+
+  // Base
+  ctx.fillStyle = '#ff922b';
+  ctx.strokeStyle = '#ffd200';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(baseX, baseY, baseRadius, 0, Math.PI*2);
+  ctx.fill();
+  ctx.stroke();
+
+  // Base icon
+  ctx.fillStyle = '#fff';
+  ctx.font = `${Math.min(baseRadius*0.7, 40)}px serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('🏠', baseX, baseY);
+
+  // Level indicator
+  ctx.font = '12px sans-serif';
+  ctx.fillStyle = '#ffd200';
+  ctx.fillText(`Lv.${level}`, baseX, baseY + baseRadius + 16);
+
+  // Survivors
+  for (let s of survivors) {
+    if (s.saved) continue;
+    let shakeX = Math.sin(s.shiver)*2;
+
+    // HP bar bg
+    ctx.fillStyle = 'rgba(0,0,0,0.5)';
+    ctx.fillRect(s.x-15+shakeX, s.y-25, 30, 5);
+    // HP bar
+    let hpColor = s.hp > 50 ? '#6bcb77' : s.hp > 25 ? '#ffd93d' : '#ff6b6b';
+    ctx.fillStyle = hpColor;
+    ctx.fillRect(s.x-15+shakeX, s.y-25, 30*(s.hp/100), 5);
+
+    // Body
+    ctx.fillStyle = s.color;
+    ctx.beginPath();
+    ctx.arc(s.x+shakeX, s.y, s.r, 0, Math.PI*2);
+    ctx.fill();
+
+    // Face
+    ctx.fillStyle = '#fff';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(s.selected ? '😃' : '🥶', s.x+shakeX, s.y);
+
+    // Selection ring
+    if (s.selected) {
+      ctx.strokeStyle = '#ffd200';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(s.x+shakeX, s.y, s.r+5, 0, Math.PI*2);
+      ctx.stroke();
+    }
+  }
+
+  // Particles
+  for (let p of particles) {
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.r*p.life, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function gameLoop(ts) {
+  let dt = Math.min((ts - lastTime)/1000, 0.05);
+  lastTime = ts;
+  update(dt);
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+lastTime = performance.now();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
